@@ -159,9 +159,9 @@ def build_message(channel_name, title, translated_title, video_url):
 
     def compose(t_e):
         return (
-            f"🎬 <b>{t_e}</b>\n"
-            f"📺 <i>{channel_e}</i>\n\n"
-            f"<blockquote>🌐 {title_fa}</blockquote>\n"
+            f"▪️ <b>{t_e}</b>\n"
+            f"©️ <i>{channel_e}</i>\n\n"
+            f"<blockquote> {title_fa}</blockquote>\n"
             f"🔗 <a href=\"{video_url}\">{channel_e}</a>"
             f"{FOOTER}"
         )

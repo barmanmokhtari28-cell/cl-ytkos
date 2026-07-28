@@ -60,8 +60,6 @@ HTTP_HEADERS = {
     )
 }
 
-CHANNEL_ID_RE = re.compile(r'"channelId":"(UC[0-9A-Za-z_-]{22})"')
-
 
 # ----------------------------------------------------------------------
 # State
@@ -83,16 +81,33 @@ def save_state(state):
 # Channel resolution + feed parsing
 # ----------------------------------------------------------------------
 
+CHANNEL_ID_PATTERNS = [
+    re.compile(r'"channelId":"(UC[0-9A-Za-z_-]{22})"'),
+    re.compile(r'"externalId":"(UC[0-9A-Za-z_-]{22})"'),
+    re.compile(r'youtube\.com/channel/(UC[0-9A-Za-z_-]{22})'),
+]
+
+
 def resolve_channel_id(handle):
     """Resolve a @handle to a UC... channel id by reading the channel page's
-    own HTML (no yt-dlp / no download needed for this)."""
+    own HTML (no yt-dlp / no download needed for this). Retries a few times
+    since YouTube occasionally serves a different page (e.g. a consent
+    page) on a given request, and tries a couple of fallback patterns."""
     url = f"https://www.youtube.com/@{handle}"
-    resp = requests.get(url, headers=HTTP_HEADERS, timeout=30)
-    resp.raise_for_status()
-    match = CHANNEL_ID_RE.search(resp.text)
-    if not match:
-        raise RuntimeError(f"Could not find channel id for @{handle} on its channel page")
-    return match.group(1)
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=HTTP_HEADERS, timeout=30)
+            resp.raise_for_status()
+            for pattern in CHANNEL_ID_PATTERNS:
+                match = pattern.search(resp.text)
+                if match:
+                    return match.group(1)
+            last_error = "no channel id pattern matched the page"
+        except Exception as e:
+            last_error = str(e)
+        time.sleep(3)
+    raise RuntimeError(f"Could not find channel id for @{handle} after retries: {last_error}")
 
 
 def fetch_recent_entries(channel_id):

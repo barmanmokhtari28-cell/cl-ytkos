@@ -2,14 +2,18 @@
 """
 YouTube -> Telegram forwarding bot.
 
-Checks a fixed list of YouTube channels for new uploads, translates the title
-to Persian, and posts a message to a Telegram channel with a high-resolution 
-playable video preview embed using Telegram's Link Preview engine. State (which 
-videos have already been posted) is kept in state.json, which this script updates 
-and the GitHub Actions workflow commits back to the repo.
+Checks a fixed list of YouTube channels for new uploads, translates the
+title to Persian, and posts a message to a Telegram channel containing the
+video link. Telegram auto-generates a native, inline-playable preview for
+YouTube links (the person can watch right inside Telegram, no separate
+file upload needed) - this sidesteps Telegram's 50MB bot-upload limit and
+YouTube's anti-bot download blocks entirely, since nothing is downloaded.
+State (which videos have already been posted) is kept in state.json,
+which this script updates and the GitHub Actions workflow commits back.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -18,15 +22,15 @@ import datetime
 import xml.etree.ElementTree as ET
 
 import requests
-import yt_dlp
 from deep_translator import GoogleTranslator
 
 # ----------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------
 
+# Add/remove channels here. "handle" is the part after the @ in the channel URL.
 CHANNELS = [
-    {"name": "fern",        "handle": "fern-tv"},
+    {"name": "fern",         "handle": "fern-tv"},
     {"name": "NeoExplains",  "handle": "neoexplains"},
     {"name": "Johnny Harris","handle": "johnnyharris"},
     {"name": "Vox",          "handle": "vox"},
@@ -46,30 +50,17 @@ TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 ATOM_NS = {
     "atom": "http://www.w3.org/2005/Atom",
     "yt": "http://www.youtube.com/xml/schemas/2015",
+    "media": "http://search.yahoo.com/mrss/",
 }
 
-COOKIES_PATH = "/tmp/yt_cookies.txt"
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+}
 
-
-def prepare_cookies():
-    """If a YT_COOKIES secret was provided, write it to a temp file yt-dlp
-    can use. Returns the path, or None if no cookies were configured."""
-    raw = os.environ.get("YT_COOKIES")
-    if not raw:
-        return None
-    with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-        f.write(raw)
-    return COOKIES_PATH
-
-
-def base_ydl_opts(cookiefile=None):
-    """Options used by yt-dlp to resolve channel handles."""
-    opts = {
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-    }
-    if cookiefile:
-        opts["cookiefile"] = cookiefile
-    return opts
+CHANNEL_ID_RE = re.compile(r'"channelId":"(UC[0-9A-Za-z_-]{22})"')
 
 
 # ----------------------------------------------------------------------
@@ -85,35 +76,29 @@ def load_state():
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+        json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 # ----------------------------------------------------------------------
 # Channel resolution + feed parsing
 # ----------------------------------------------------------------------
 
-def resolve_channel_id(handle, cookiefile=None):
-    """Resolve a @handle to a UC... channel id using yt-dlp."""
-    url = f"https://www.youtube.com/@{handle}/videos"
-    ydl_opts = {
-        "quiet": True,
-        "extract_flat": "in_playlist",
-        "playlist_items": "1",
-        "skip_download": True,
-        **base_ydl_opts(cookiefile),
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    channel_id = info.get("channel_id") or info.get("uploader_id") or info.get("id")
-    if not channel_id or not str(channel_id).startswith("UC"):
-        raise RuntimeError(f"Could not resolve channel id for @{handle}: got {channel_id!r}")
-    return channel_id
+def resolve_channel_id(handle):
+    """Resolve a @handle to a UC... channel id by reading the channel page's
+    own HTML (no yt-dlp / no download needed for this)."""
+    url = f"https://www.youtube.com/@{handle}"
+    resp = requests.get(url, headers=HTTP_HEADERS, timeout=30)
+    resp.raise_for_status()
+    match = CHANNEL_ID_RE.search(resp.text)
+    if not match:
+        raise RuntimeError(f"Could not find channel id for @{handle} on its channel page")
+    return match.group(1)
 
 
 def fetch_recent_entries(channel_id):
     """Return list of dicts: video_id, title, published (datetime), url."""
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    resp = requests.get(feed_url, timeout=30)
+    resp = requests.get(feed_url, headers=HTTP_HEADERS, timeout=30)
     resp.raise_for_status()
     root = ET.fromstring(resp.content)
 
@@ -135,7 +120,7 @@ def fetch_recent_entries(channel_id):
 
 
 # ----------------------------------------------------------------------
-# Translation + message building
+# Translation + caption
 # ----------------------------------------------------------------------
 
 def translate_to_persian(text):
@@ -150,36 +135,46 @@ def build_message(channel_name, title, translated_title, video_url):
     title_e = html.escape(title)
     title_fa = html.escape(translated_title)
     channel_e = html.escape(channel_name)
-    
-    message = (
+    text = (
         f"🎬 <b>{title_e}</b>\n"
         f"📺 <i>{channel_e}</i>\n\n"
         f"🌐 <b>{title_fa}</b>\n\n"
         f"🔗 {video_url}"
         f"{FOOTER}"
     )
-    return message
+    if len(text) > 3900:  # sendMessage allows up to 4096 chars - stay comfortably under
+        overflow = len(text) - 3900
+        title_e = html.escape(title[: max(10, len(title) - overflow)] + "…")
+        text = (
+            f"🎬 <b>{title_e}</b>\n"
+            f"📺 <i>{channel_e}</i>\n\n"
+            f"🌐 <b>{title_fa}</b>\n\n"
+            f"🔗 {video_url}"
+            f"{FOOTER}"
+        )
+    return text
 
 
 # ----------------------------------------------------------------------
 # Telegram sending
 # ----------------------------------------------------------------------
 
-def send_telegram_post(message_text, video_url):
-    """Posts text with YouTube large video link preview enabled."""
+def send_video_message(text, video_url):
+    """Send a text message containing the video link. Telegram will
+    automatically render its native inline-playable YouTube preview
+    below the text, so the video plays right in the channel."""
     payload = {
         "chat_id": CHANNEL_ID,
-        "text": message_text,
+        "text": text,
         "parse_mode": "HTML",
-        "link_preview_options": {
+        "link_preview_options": json.dumps({
             "url": video_url,
             "prefer_large_media": True,
             "show_above_text": False,
-        }
+        }),
     }
-    
-    resp = requests.post(f"{TG_API}/sendMessage", json=payload, timeout=30)
-    ok = resp.ok and resp.json().get("ok", False)
+    resp = requests.post(f"{TG_API}/sendMessage", data=payload, timeout=60)
+    ok = resp.ok and resp.json().get("ok")
     if not ok:
         print(f"  sendMessage failed: {resp.status_code} {resp.text}", file=sys.stderr)
     return ok
@@ -190,7 +185,6 @@ def send_telegram_post(message_text, video_url):
 # ----------------------------------------------------------------------
 
 def main():
-    cookiefile = prepare_cookies()
     state = load_state()
     now = datetime.datetime.now(datetime.timezone.utc)
     backfill_cutoff = now - datetime.timedelta(hours=BACKFILL_HOURS)
@@ -204,7 +198,7 @@ def main():
 
         try:
             if not ch_state["channel_id"]:
-                ch_state["channel_id"] = resolve_channel_id(handle, cookiefile)
+                ch_state["channel_id"] = resolve_channel_id(handle)
             entries = fetch_recent_entries(ch_state["channel_id"])
         except Exception as e:
             print(f"  ERROR fetching feed: {e}", file=sys.stderr)
@@ -224,13 +218,10 @@ def main():
             if should_post:
                 print(f"  new video: {entry['title']} ({entry['video_id']})")
                 translated = translate_to_persian(entry["title"])
-                msg_text = build_message(name, entry["title"], translated, entry["url"])
-
-                ok = send_telegram_post(msg_text, entry["url"])
+                text = build_message(name, entry["title"], translated, entry["url"])
+                ok = send_video_message(text, entry["url"])
                 if ok:
                     time.sleep(2)  # be gentle with Telegram's API
-                else:
-                    print(f"  failed to post message for video {entry['video_id']}", file=sys.stderr)
             else:
                 print(f"  skipping (older than backfill window): {entry['title']}")
 

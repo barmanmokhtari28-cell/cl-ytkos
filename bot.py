@@ -54,6 +54,32 @@ ATOM_NS = {
     "media": "http://search.yahoo.com/mrss/",
 }
 
+COOKIES_PATH = "/tmp/yt_cookies.txt"
+
+
+def prepare_cookies():
+    """If a YT_COOKIES secret was provided, write it to a temp file yt-dlp
+    can use. Returns the path, or None if no cookies were configured."""
+    raw = os.environ.get("YT_COOKIES")
+    if not raw:
+        return None
+    with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+        f.write(raw)
+    return COOKIES_PATH
+
+
+def base_ydl_opts(cookiefile=None):
+    """Options shared by every yt-dlp call: try the 'android' client first,
+    since it often sidesteps YouTube's 'sign in to confirm you're not a
+    bot' check without needing cookies at all; fall back to web. If a
+    cookies file is available, add it too for the toughest cases."""
+    opts = {
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+    }
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
+    return opts
+
 
 # ----------------------------------------------------------------------
 # State
@@ -75,7 +101,7 @@ def save_state(state):
 # Channel resolution + feed parsing
 # ----------------------------------------------------------------------
 
-def resolve_channel_id(handle):
+def resolve_channel_id(handle, cookiefile=None):
     """Resolve a @handle to a UC... channel id using yt-dlp (no download)."""
     url = f"https://www.youtube.com/@{handle}/videos"
     ydl_opts = {
@@ -83,6 +109,7 @@ def resolve_channel_id(handle):
         "extract_flat": "in_playlist",
         "playlist_items": "1",
         "skip_download": True,
+        **base_ydl_opts(cookiefile),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -120,10 +147,15 @@ def fetch_recent_entries(channel_id):
 # Download
 # ----------------------------------------------------------------------
 
-def download_video(video_url, out_path_no_ext):
+def download_video(video_url, out_path_no_ext, cookiefile=None):
     """Try progressively lower resolutions until the file fits under the
-    Telegram size cap. Returns the final file path, or None if even the
-    lowest resolution didn't fit (caller should fall back to a link post)."""
+    Telegram size cap. Returns (path, None) on success, or (None, reason)
+    where reason is 'blocked' (yt-dlp couldn't download at all - bot-check/
+    auth issue) or 'too_large' (downloaded fine but no resolution fit under
+    the size cap) so the caller can report the real cause."""
+    last_error = None
+    got_any_file = False
+
     for height in HEIGHT_ATTEMPTS:
         out_tmpl = f"{out_path_no_ext}.%(ext)s"
         ydl_opts = {
@@ -133,6 +165,7 @@ def download_video(video_url, out_path_no_ext):
             "quiet": True,
             "noplaylist": True,
             "retries": 3,
+            **base_ydl_opts(cookiefile),
         }
         # clean any leftover file from a previous attempt
         for f in os.listdir(os.path.dirname(out_path_no_ext) or "."):
@@ -146,6 +179,7 @@ def download_video(video_url, out_path_no_ext):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
         except Exception as e:
+            last_error = str(e)
             print(f"  download at <= {height}p failed: {e}", file=sys.stderr)
             continue
 
@@ -153,13 +187,18 @@ def download_video(video_url, out_path_no_ext):
         if not os.path.exists(final_path):
             continue
 
+        got_any_file = True
         size_mb = os.path.getsize(final_path) / (1024 * 1024)
         print(f"  tried <= {height}p -> {size_mb:.1f} MB")
         if size_mb <= MAX_TELEGRAM_MB:
-            return final_path
+            return final_path, None
         os.remove(final_path)
 
-    return None
+    if got_any_file:
+        return None, "too_large"
+    if last_error and ("sign in" in last_error.lower() or "bot" in last_error.lower()):
+        return None, "blocked"
+    return None, "blocked" if last_error else "unknown"
 
 
 # ----------------------------------------------------------------------
@@ -215,9 +254,14 @@ def send_video(file_path, caption):
     return ok
 
 
-def send_link_fallback(video_id, caption, video_url):
+def send_link_fallback(video_id, caption, video_url, reason="unknown"):
     thumb = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
-    caption_with_link = caption + f"\n\n🔗 <a href=\"{video_url}\">تماشا در یوتیوب</a> (فایل حجیم بود)"
+    reason_fa = {
+        "too_large": "فایل حجیم بود",
+        "blocked": "دانلود مسدود شد",
+        "unknown": "دانلود ناموفق بود",
+    }.get(reason, "دانلود ناموفق بود")
+    caption_with_link = caption + f"\n\n🔗 <a href=\"{video_url}\">تماشا در یوتیوب</a> ({reason_fa})"
     resp = requests.post(
         f"{TG_API}/sendPhoto",
         data={
@@ -239,6 +283,9 @@ def send_link_fallback(video_id, caption, video_url):
 # ----------------------------------------------------------------------
 
 def main():
+    cookiefile = prepare_cookies()
+    print("Using YouTube cookies: yes" if cookiefile else "Using YouTube cookies: no (set YT_COOKIES secret if downloads keep getting blocked)")
+
     state = load_state()
     now = datetime.datetime.now(datetime.timezone.utc)
     backfill_cutoff = now - datetime.timedelta(hours=BACKFILL_HOURS)
@@ -252,7 +299,7 @@ def main():
 
         try:
             if not ch_state["channel_id"]:
-                ch_state["channel_id"] = resolve_channel_id(handle)
+                ch_state["channel_id"] = resolve_channel_id(handle, cookiefile)
             entries = fetch_recent_entries(ch_state["channel_id"])
         except Exception as e:
             print(f"  ERROR fetching feed: {e}", file=sys.stderr)
@@ -275,7 +322,7 @@ def main():
                 caption = build_caption(name, entry["title"], translated)
 
                 tmp_base = f"/tmp/{entry['video_id']}"
-                video_path = download_video(entry["url"], tmp_base)
+                video_path, fail_reason = download_video(entry["url"], tmp_base, cookiefile)
 
                 if video_path:
                     ok = send_video(video_path, caption)
@@ -284,8 +331,8 @@ def main():
                     except OSError:
                         pass
                 else:
-                    print("  too large at every attempted resolution, posting link fallback")
-                    ok = send_link_fallback(entry["video_id"], caption, entry["url"])
+                    print(f"  could not get the video file (reason: {fail_reason}); posting link fallback")
+                    ok = send_link_fallback(entry["video_id"], caption, entry["url"], fail_reason)
 
                 if ok:
                     time.sleep(2)  # be gentle with Telegram's API

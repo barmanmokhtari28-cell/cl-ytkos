@@ -37,6 +37,9 @@ CHANNELS = [
     {"name": "IMPERIAL",   "handle": "imperialyt"},
     {"name": "ECHOZERO",   "handle": "echozero"},
     {"name": "The Present Past",   "handle": "ThePresentPast_"},
+    {"name": "Veritasium",   "handle": "veritasium"},
+    {"name": "Vox",   "handle": "Vox"},
+    {"name": "Kurzgesagt – In a Nutshell",   "handle": "kurzgesagt"},
 ]
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]          # from GitHub Actions secret

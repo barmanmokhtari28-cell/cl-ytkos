@@ -40,7 +40,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]          # from GitHub Actions secret
 CHANNEL_ID = os.environ["TG_CHANNEL_ID"]     # e.g. "@secretollah", from secret
 
 STATE_FILE = "state.json"
-BACKFILL_HOURS = 48          # "last 2 days" for the very first run per channel
+BACKFILL_HOURS = 168        # how far back the very first run per channel looks (7 days)
 MAX_TELEGRAM_MB = 49         # stay just under the 50MB bot upload limit
 HEIGHT_ATTEMPTS = [480, 360, 240]   # resolution ladder to try to fit the size cap
 
@@ -230,7 +230,7 @@ def build_caption(channel_name, title, translated_title):
         caption = (
             f"🎬 <b>{title_e}</b>\n"
             f"📺 <i>{channel_e}</i>\n\n"
-            f"🇮🇷 <b>{title_fa}</b>"
+            f"✨ <b>{title_fa}</b>"
             f"{FOOTER}"
         )
     return caption[:1024]

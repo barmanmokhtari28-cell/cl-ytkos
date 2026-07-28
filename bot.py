@@ -220,7 +220,7 @@ def build_caption(channel_name, title, translated_title):
     caption = (
         f"🎬 <b>{title_e}</b>\n"
         f"📺 <i>{channel_e}</i>\n\n"
-        f"🇮🇷 <b>{title_fa}</b>"
+        f"🌐 <b>{title_fa}</b>"
         f"{FOOTER}"
     )
     if len(caption) > 1024:
@@ -230,7 +230,7 @@ def build_caption(channel_name, title, translated_title):
         caption = (
             f"🎬 <b>{title_e}</b>\n"
             f"📺 <i>{channel_e}</i>\n\n"
-            f"✨ <b>{title_fa}</b>"
+            f"🌐 <b>{title_fa}</b>"
             f"{FOOTER}"
         )
     return caption[:1024]

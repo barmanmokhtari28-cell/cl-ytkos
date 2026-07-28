@@ -55,13 +55,25 @@ encrypted secret store, and they're masked in logs.
   fit at any of those, it posts the thumbnail + title + a link to watch
   on YouTube instead of the file, so you never lose the notification
   entirely — you just don't get the video file for that one.
-- **YouTube sometimes blocks cloud IPs** (including GitHub's) with a
-  "Sign in to confirm you're not a bot" error. If you start seeing
-  `download failed` errors in the Actions logs, the fix is to export
-  YouTube cookies from your own logged-in browser (via a browser
-  extension like "Get cookies.txt"), add the file's contents as a new
-  secret `YT_COOKIES`, and I can adjust the script to use it — just come
-  back and tell me if this happens.
+- **YouTube blocks cloud IPs** (including GitHub's) with a "Sign in to
+  confirm you're not a bot" error fairly often — this is expected, not a
+  bug in the script. The bot already tries a workaround automatically
+  (a different YouTube "client" that sometimes avoids the check), but
+  for full reliability add your own cookies:
+  1. In your normal browser, install a cookie-export extension (e.g.
+     "Get cookies.txt LOCALLY" for Chrome/Firefox).
+  2. Log into YouTube with any Google account (a spare/throwaway account
+     is safer than your main one — cookies used for automation can
+     occasionally get flagged).
+  3. On youtube.com, use the extension to export cookies in Netscape
+     format, and copy the entire file contents.
+  4. In the repo: **Settings → Secrets and variables → Actions → New
+     repository secret**, name it `YT_COOKIES`, and paste the file
+     contents as the value.
+  5. Re-run the workflow. Once cookies are picked up you'll see
+     `Using YouTube cookies: yes` at the top of the run's log.
+  Cookies expire eventually (weeks to months) — if blocking errors
+  return later, just re-export and update the secret.
 - Public repos get free GitHub Actions minutes for scheduled jobs like
   this; nothing to pay as long as you stay on the public tier.
 

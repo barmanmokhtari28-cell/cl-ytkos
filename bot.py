@@ -43,7 +43,7 @@ CHANNEL_ID = os.environ["TG_CHANNEL_ID"]     # e.g. "@secretollah", from secret
 STATE_FILE = "state.json"
 BACKFILL_HOURS = 168        # how far back the very first run per channel looks (7 days)
 
-FOOTER = "\n\n📩 @secretollah\n#یوتوب"
+FOOTER = "\n\n📩 <b>@secretollah</b>\n#یوتوب"
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -147,26 +147,28 @@ def translate_to_persian(text):
 
 
 def build_message(channel_name, title, translated_title, video_url):
+    """Rich-text caption using Telegram's supported HTML formatting:
+    bold title, italic channel name, a blockquote to set the Persian
+    translation apart, and the 🔗 line hyperlinked through the channel
+    name (instead of showing the raw URL as plain text)."""
     title_e = html.escape(title)
     title_fa = html.escape(translated_title)
     channel_e = html.escape(channel_name)
-    text = (
-        f"🎬 <b>{title_e}</b>\n"
-        f"📺 <i>{channel_e}</i>\n\n"
-        f"🌐 <b>{title_fa}</b>\n\n"
-        f"🔗 {video_url}"
-        f"{FOOTER}"
-    )
+
+    def compose(t_e):
+        return (
+            f"🎬 <b>{t_e}</b>\n"
+            f"📺 <i>{channel_e}</i>\n\n"
+            f"<blockquote>🌐 {title_fa}</blockquote>\n"
+            f"🔗 <a href=\"{video_url}\">{channel_e}</a>"
+            f"{FOOTER}"
+        )
+
+    text = compose(title_e)
     if len(text) > 3900:  # sendMessage allows up to 4096 chars - stay comfortably under
         overflow = len(text) - 3900
         title_e = html.escape(title[: max(10, len(title) - overflow)] + "…")
-        text = (
-            f"🎬 <b>{title_e}</b>\n"
-            f"📺 <i>{channel_e}</i>\n\n"
-            f"🌐 <b>{title_fa}</b>\n\n"
-            f"🔗 {video_url}"
-            f"{FOOTER}"
-        )
+        text = compose(title_e)
     return text
 
 

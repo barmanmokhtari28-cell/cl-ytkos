@@ -2,13 +2,14 @@
 """
 YouTube -> Telegram forwarding bot.
 
-Checks a fixed list of YouTube channels for new uploads, downloads each new
-video (capped at 480p and below so it fits Telegram's 50MB bot-upload
-limit), translates the title to Persian, and uploads the actual video file
-to a Telegram channel with rich (HTML) formatting - this is what makes it
-playable right inside Telegram, unlike a plain link. State (which videos
-have already been posted) is kept in state.json, which this script updates
-and the GitHub Actions workflow commits back to the repo.
+Checks a fixed list of YouTube channels for new uploads, translates the
+title to Persian, and posts a message to a Telegram channel containing the
+video link. Telegram auto-generates a native, inline-playable preview for
+YouTube links (the person can watch right inside Telegram, no separate
+file upload needed) - this sidesteps Telegram's 50MB bot-upload limit and
+YouTube's anti-bot download blocks entirely, since nothing is downloaded.
+State (which videos have already been posted) is kept in state.json,
+which this script updates and the GitHub Actions workflow commits back.
 """
 
 import os
@@ -21,7 +22,6 @@ import datetime
 import xml.etree.ElementTree as ET
 
 import requests
-import yt_dlp
 from deep_translator import GoogleTranslator
 
 # ----------------------------------------------------------------------
@@ -41,9 +41,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]          # from GitHub Actions secret
 CHANNEL_ID = os.environ["TG_CHANNEL_ID"]     # e.g. "@secretollah", from secret
 
 STATE_FILE = "state.json"
-BACKFILL_HOURS = 168         # how far back the very first run per channel looks (7 days)
-MAX_TELEGRAM_MB = 49          # stay just under the 50MB bot upload limit
-HEIGHT_ATTEMPTS = [480, 360, 240]   # resolution ladder to try to fit the size cap
+BACKFILL_HOURS = 168        # how far back the very first run per channel looks (7 days)
 
 FOOTER = "\n\n📩 @secretollah\n#یوتوب"
 
@@ -55,31 +53,12 @@ ATOM_NS = {
     "media": "http://search.yahoo.com/mrss/",
 }
 
-COOKIES_PATH = "/tmp/yt_cookies.txt"
-
-
-def prepare_cookies():
-    """If a YT_COOKIES secret was provided, write it to a temp file yt-dlp
-    can use. Returns the path, or None if no cookies were configured."""
-    raw = os.environ.get("YT_COOKIES")
-    if not raw:
-        return None
-    with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-        f.write(raw)
-    return COOKIES_PATH
-
-
-def base_ydl_opts(cookiefile=None):
-    """Options shared by every yt-dlp call: try the 'android' client first,
-    since it often sidesteps YouTube's 'sign in to confirm you're not a
-    bot' check without needing cookies at all; fall back to web. If a
-    cookies file is available, add it too for the toughest cases."""
-    opts = {
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-    }
-    if cookiefile:
-        opts["cookiefile"] = cookiefile
-    return opts
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+}
 
 
 # ----------------------------------------------------------------------
@@ -102,35 +81,39 @@ def save_state(state):
 # Channel resolution + feed parsing
 # ----------------------------------------------------------------------
 
-def resolve_channel_id(handle, cookiefile=None):
-    """Resolve a @handle to a UC... channel id using yt-dlp (no download)."""
-    url = f"https://www.youtube.com/@{handle}/videos"
-    ydl_opts = {
-        "quiet": True,
-        "extract_flat": "in_playlist",
-        "playlist_items": "1",
-        "skip_download": True,
-        **base_ydl_opts(cookiefile),
-    }
+CHANNEL_ID_PATTERNS = [
+    re.compile(r'"channelId":"(UC[0-9A-Za-z_-]{22})"'),
+    re.compile(r'"externalId":"(UC[0-9A-Za-z_-]{22})"'),
+    re.compile(r'youtube\.com/channel/(UC[0-9A-Za-z_-]{22})'),
+]
+
+
+def resolve_channel_id(handle):
+    """Resolve a @handle to a UC... channel id by reading the channel page's
+    own HTML (no yt-dlp / no download needed for this). Retries a few times
+    since YouTube occasionally serves a different page (e.g. a consent
+    page) on a given request, and tries a couple of fallback patterns."""
+    url = f"https://www.youtube.com/@{handle}"
     last_error = None
     for attempt in range(3):
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-            channel_id = info.get("channel_id") or info.get("uploader_id") or info.get("id")
-            if channel_id and str(channel_id).startswith("UC"):
-                return channel_id
-            last_error = f"got {channel_id!r}"
+            resp = requests.get(url, headers=HTTP_HEADERS, timeout=30)
+            resp.raise_for_status()
+            for pattern in CHANNEL_ID_PATTERNS:
+                match = pattern.search(resp.text)
+                if match:
+                    return match.group(1)
+            last_error = "no channel id pattern matched the page"
         except Exception as e:
             last_error = str(e)
         time.sleep(3)
-    raise RuntimeError(f"Could not resolve channel id for @{handle} after retries: {last_error}")
+    raise RuntimeError(f"Could not find channel id for @{handle} after retries: {last_error}")
 
 
 def fetch_recent_entries(channel_id):
     """Return list of dicts: video_id, title, published (datetime), url."""
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    resp = requests.get(feed_url, timeout=30)
+    resp = requests.get(feed_url, headers=HTTP_HEADERS, timeout=30)
     resp.raise_for_status()
     root = ET.fromstring(resp.content)
 
@@ -152,64 +135,6 @@ def fetch_recent_entries(channel_id):
 
 
 # ----------------------------------------------------------------------
-# Download
-# ----------------------------------------------------------------------
-
-def download_video(video_url, out_path_no_ext, cookiefile=None):
-    """Try progressively lower resolutions until the file fits under the
-    Telegram size cap. Returns (path, None) on success, or (None, reason)
-    where reason is 'blocked' (yt-dlp couldn't download at all - bot-check/
-    auth issue) or 'too_large' (downloaded fine but no resolution fit under
-    the size cap) so the caller can report the real cause."""
-    last_error = None
-    got_any_file = False
-
-    for height in HEIGHT_ATTEMPTS:
-        out_tmpl = f"{out_path_no_ext}.%(ext)s"
-        ydl_opts = {
-            "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]",
-            "merge_output_format": "mp4",
-            "outtmpl": out_tmpl,
-            "quiet": True,
-            "noplaylist": True,
-            "retries": 3,
-            **base_ydl_opts(cookiefile),
-        }
-        # clean any leftover file from a previous attempt
-        for f in os.listdir(os.path.dirname(out_path_no_ext) or "."):
-            if f.startswith(os.path.basename(out_path_no_ext)):
-                try:
-                    os.remove(os.path.join(os.path.dirname(out_path_no_ext) or ".", f))
-                except OSError:
-                    pass
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
-        except Exception as e:
-            last_error = str(e)
-            print(f"  download at <= {height}p failed: {e}", file=sys.stderr)
-            continue
-
-        final_path = f"{out_path_no_ext}.mp4"
-        if not os.path.exists(final_path):
-            continue
-
-        got_any_file = True
-        size_mb = os.path.getsize(final_path) / (1024 * 1024)
-        print(f"  tried <= {height}p -> {size_mb:.1f} MB")
-        if size_mb <= MAX_TELEGRAM_MB:
-            return final_path, None
-        os.remove(final_path)
-
-    if got_any_file:
-        return None, "too_large"
-    if last_error and ("sign in" in last_error.lower() or "bot" in last_error.lower()):
-        return None, "blocked"
-    return None, "blocked" if last_error else "unknown"
-
-
-# ----------------------------------------------------------------------
 # Translation + caption
 # ----------------------------------------------------------------------
 
@@ -221,68 +146,52 @@ def translate_to_persian(text):
         return "(ترجمه در دسترس نیست)"
 
 
-def build_caption(channel_name, title, translated_title):
+def build_message(channel_name, title, translated_title, video_url):
     title_e = html.escape(title)
     title_fa = html.escape(translated_title)
     channel_e = html.escape(channel_name)
-    caption = (
+    text = (
         f"🎬 <b>{title_e}</b>\n"
         f"📺 <i>{channel_e}</i>\n\n"
-        f"🌐 <b>{title_fa}</b>"
+        f"🌐 <b>{title_fa}</b>\n\n"
+        f"🔗 {video_url}"
         f"{FOOTER}"
     )
-    if len(caption) > 1024:
-        # Telegram media captions are capped at 1024 chars - trim titles if needed
-        overflow = len(caption) - 1024
+    if len(text) > 3900:  # sendMessage allows up to 4096 chars - stay comfortably under
+        overflow = len(text) - 3900
         title_e = html.escape(title[: max(10, len(title) - overflow)] + "…")
-        caption = (
+        text = (
             f"🎬 <b>{title_e}</b>\n"
             f"📺 <i>{channel_e}</i>\n\n"
-            f"🌐 <b>{title_fa}</b>"
+            f"🌐 <b>{title_fa}</b>\n\n"
+            f"🔗 {video_url}"
             f"{FOOTER}"
         )
-    return caption[:1024]
+    return text
 
 
 # ----------------------------------------------------------------------
 # Telegram sending
 # ----------------------------------------------------------------------
 
-def send_video(file_path, caption):
-    with open(file_path, "rb") as f:
-        resp = requests.post(
-            f"{TG_API}/sendVideo",
-            data={"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML"},
-            files={"video": f},
-            timeout=300,
-        )
+def send_video_message(text, video_url):
+    """Send a text message containing the video link. Telegram will
+    automatically render its native inline-playable YouTube preview
+    below the text, so the video plays right in the channel."""
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "link_preview_options": json.dumps({
+            "url": video_url,
+            "prefer_large_media": True,
+            "show_above_text": False,
+        }),
+    }
+    resp = requests.post(f"{TG_API}/sendMessage", data=payload, timeout=60)
     ok = resp.ok and resp.json().get("ok")
     if not ok:
-        print(f"  sendVideo failed: {resp.status_code} {resp.text}", file=sys.stderr)
-    return ok
-
-
-def send_link_fallback(video_id, caption, video_url, reason="unknown"):
-    thumb = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
-    reason_fa = {
-        "too_large": "فایل حجیم بود",
-        "blocked": "دانلود مسدود شد",
-        "unknown": "دانلود ناموفق بود",
-    }.get(reason, "دانلود ناموفق بود")
-    caption_with_link = caption + f"\n\n🔗 <a href=\"{video_url}\">تماشا در یوتیوب</a> ({reason_fa})"
-    resp = requests.post(
-        f"{TG_API}/sendPhoto",
-        data={
-            "chat_id": CHANNEL_ID,
-            "photo": thumb,
-            "caption": caption_with_link[:1024],
-            "parse_mode": "HTML",
-        },
-        timeout=60,
-    )
-    ok = resp.ok and resp.json().get("ok")
-    if not ok:
-        print(f"  sendPhoto fallback failed: {resp.status_code} {resp.text}", file=sys.stderr)
+        print(f"  sendMessage failed: {resp.status_code} {resp.text}", file=sys.stderr)
     return ok
 
 
@@ -291,9 +200,6 @@ def send_link_fallback(video_id, caption, video_url, reason="unknown"):
 # ----------------------------------------------------------------------
 
 def main():
-    cookiefile = prepare_cookies()
-    print("Using YouTube cookies: yes" if cookiefile else "Using YouTube cookies: no (set YT_COOKIES secret if downloads keep getting blocked)")
-
     state = load_state()
     now = datetime.datetime.now(datetime.timezone.utc)
     backfill_cutoff = now - datetime.timedelta(hours=BACKFILL_HOURS)
@@ -307,7 +213,7 @@ def main():
 
         try:
             if not ch_state["channel_id"]:
-                ch_state["channel_id"] = resolve_channel_id(handle, cookiefile)
+                ch_state["channel_id"] = resolve_channel_id(handle)
             entries = fetch_recent_entries(ch_state["channel_id"])
         except Exception as e:
             print(f"  ERROR fetching feed: {e}", file=sys.stderr)
@@ -327,21 +233,8 @@ def main():
             if should_post:
                 print(f"  new video: {entry['title']} ({entry['video_id']})")
                 translated = translate_to_persian(entry["title"])
-                caption = build_caption(name, entry["title"], translated)
-
-                tmp_base = f"/tmp/{entry['video_id']}"
-                video_path, fail_reason = download_video(entry["url"], tmp_base, cookiefile)
-
-                if video_path:
-                    ok = send_video(video_path, caption)
-                    try:
-                        os.remove(video_path)
-                    except OSError:
-                        pass
-                else:
-                    print(f"  could not get the video file (reason: {fail_reason}); posting link fallback")
-                    ok = send_link_fallback(entry["video_id"], caption, entry["url"], fail_reason)
-
+                text = build_message(name, entry["title"], translated, entry["url"])
+                ok = send_video_message(text, entry["url"])
                 if ok:
                     time.sleep(2)  # be gentle with Telegram's API
             else:

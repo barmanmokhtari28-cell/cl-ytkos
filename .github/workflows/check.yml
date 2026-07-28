@@ -28,8 +28,11 @@ jobs:
       - name: Make sure ffmpeg is available
         run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
 
-      - name: Install a JS runtime for yt-dlp
-        run: curl -fsSL https://deno.land/install.sh | sh -s -- -y && echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+      - name: Install a JS runtime for yt-dlp (best-effort, optional)
+        continue-on-error: true
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh -s -- -y || echo "deno install failed, continuing without it"
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: pip install -r requirements.txt

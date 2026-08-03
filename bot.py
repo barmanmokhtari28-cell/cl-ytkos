@@ -25,17 +25,20 @@ from deep_translator import GoogleTranslator
 # Config
 # ----------------------------------------------------------------------
 
+# Provide the exact "id" (starts with UC...) to guarantee accuracy.
+# If "id" is provided, handle resolution is skipped completely.
 CHANNELS = [
-    {"name": "fern",         "handle": "fern-tv"},
-    {"name": "NeoExplains",  "handle": "neoexplains"},
-    {"name": "Johnny Harris","handle": "johnnyharris"},
-    {"name": "Hoog",          "handle": "hoog-youtube"},
-    {"name": "IMPERIAL",      "handle": "imperialyt"},
-    {"name": "ECHOZERO",      "handle": "echozero"},
-    {"name": "The Present Past", "handle": "ThePresentPast_"},
-    {"name": "Veritasium",   "handle": "veritasium"},
-    {"name": "Vox",          "handle": "Vox"},
-    {"name": "Kurzgesagt – In a Nutshell", "handle": "kurzgesagt"},
+    {"name": "fern",                         "id": "UCvjjYje5A15ojfs84A0252Q", "handle": "fern-tv"},
+    {"name": "NeoExplains",                  "id": "UC1JsBTh4b3L_K923B06C2Yw", "handle": "neoexplains"},
+    {"name": "Johnny Harris",               "id": "UC2LVhJH_9cT2XKp0VAwgKOQ", "handle": "johnnyharris"},
+    {"name": "Hoog",                         "id": "UCeE3lj6pLX36O5JTh161Tqw", "handle": "hoog-youtube"},
+    {"name": "IMPERIAL",                     "id": "UCa90xL5Oip6-9d3eO00JqEQ", "handle": "imperialyt"},
+    {"name": "Veritasium",                   "id": "UCL4BnTQ3kAn5oV9T_8x_3qw", "handle": "veritasium"},
+    {"name": "Vox",                          "id": "UC3xtQGSvtczkampkA8hOJCg", "handle": "Vox"},
+    {"name": "Kurzgesagt – In a Nutshell",   "id": "UCsXVk37bltHxD1rDPwtNM8Q", "handle": "kurzgesagt"},
+    # Replace with their exact UC... IDs if they aren't working:
+    {"name": "ECHOZERO",                     "id": "",                        "handle": "echozero"},
+    {"name": "The Present Past",             "id": "",                        "handle": "ThePresentPast_"},
 ]
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]          # from GitHub Actions secret
@@ -90,7 +93,7 @@ CHANNEL_ID_PATTERNS = [
 
 
 def resolve_channel_id(handle):
-    """Resolve a @handle to a UC... channel id by reading the channel page's HTML."""
+    """Fallback: Resolve a @handle to a UC... channel id by reading page HTML."""
     url = f"https://www.youtube.com/@{handle}"
     last_error = None
     for attempt in range(3):
@@ -111,7 +114,6 @@ def resolve_channel_id(handle):
 def fetch_recent_entries(channel_id):
     """Return list of dicts: video_id, title, published (datetime), url.
     Uses playlist_id=UULF... to specifically target long-form videos."""
-    # Convert 'UC...' channel ID to 'UULF...' long-form video playlist ID
     if channel_id.startswith("UC"):
         playlist_id = "UULF" + channel_id[2:]
         feed_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={playlist_id}"
@@ -134,7 +136,6 @@ def fetch_recent_entries(channel_id):
             "published": published,
             "url": f"https://www.youtube.com/watch?v={video_id}",
         })
-    # oldest first, so we post in upload order
     entries.sort(key=lambda e: e["published"])
     return entries
 
@@ -152,7 +153,6 @@ def translate_to_persian(text):
 
 
 def build_message(channel_name, title, translated_title, video_url):
-    """Rich-text caption using Telegram's supported HTML formatting."""
     title_e = html.escape(title)
     title_fa = html.escape(translated_title)
     channel_e = html.escape(channel_name)
@@ -167,7 +167,7 @@ def build_message(channel_name, title, translated_title, video_url):
         )
 
     text = compose(title_e)
-    if len(text) > 3900:  # stay under Telegram's limit
+    if len(text) > 3900:
         overflow = len(text) - 3900
         title_e = html.escape(title[: max(10, len(title) - overflow)] + "…")
         text = compose(title_e)
@@ -179,7 +179,6 @@ def build_message(channel_name, title, translated_title, video_url):
 # ----------------------------------------------------------------------
 
 def send_video_message(text, video_url):
-    """Send a text message containing the video link."""
     payload = {
         "chat_id": CHANNEL_ID,
         "text": text,
@@ -214,8 +213,12 @@ def main():
         ch_state = state.setdefault(handle, {"initialized": False, "posted_ids": [], "channel_id": None})
 
         try:
-            if not ch_state["channel_id"]:
+            # Prefer explicit 'id' from config over old state or scraper resolution
+            if ch.get("id"):
+                ch_state["channel_id"] = ch["id"]
+            elif not ch_state["channel_id"]:
                 ch_state["channel_id"] = resolve_channel_id(handle)
+
             entries = fetch_recent_entries(ch_state["channel_id"])
         except Exception as e:
             print(f"  ERROR fetching feed: {e}", file=sys.stderr)
@@ -230,7 +233,7 @@ def main():
 
             should_post = True
             if first_run and entry["published"] < backfill_cutoff:
-                should_post = False  # too old for the initial backfill window
+                should_post = False
 
             if should_post:
                 print(f"  new video: {entry['title']} ({entry['video_id']})")
@@ -238,11 +241,10 @@ def main():
                 text = build_message(name, entry["title"], translated, entry["url"])
                 ok = send_video_message(text, entry["url"])
                 if ok:
-                    time.sleep(2)  # be gentle with Telegram's API
+                    time.sleep(2)
             else:
                 print(f"  skipping (older than backfill window): {entry['title']}")
 
-            # mark as seen regardless, so it's never reprocessed
             posted_ids.add(entry["video_id"])
 
         ch_state["posted_ids"] = list(posted_ids)

@@ -29,16 +29,16 @@ from deep_translator import GoogleTranslator
 # If "id" is provided, handle resolution is skipped completely.
 CHANNELS = [
     {"name": "fern",                         "id": "UCODHrzPMGbNv67e84WDZhQQ", "handle": "fern-tv"},
-    {"name": "NeoExplains",                  "id": "UC1JsBTh4b3L_K923B06C2Yw", "handle": "neoexplains"},
-    {"name": "Johnny Harris",               "id": "UC2LVhJH_9cT2XKp0VAwgKOQ", "handle": "johnnyharris"},
-    {"name": "Hoog",                         "id": "UCeE3lj6pLX36O5JTh161Tqw", "handle": "hoog-youtube"},
-    {"name": "IMPERIAL",                     "id": "UCa90xL5Oip6-9d3eO00JqEQ", "handle": "imperialyt"},
-    {"name": "Veritasium",                   "id": "UCL4BnTQ3kAn5oV9T_8x_3qw", "handle": "veritasium"},
-    {"name": "Vox",                          "id": "UC3xtQGSvtczkampkA8hOJCg", "handle": "Vox"},
+    {"name": "NeoExplains",                  "id": "UCtYKe7-XbaDjpUwcU5x0bLg", "handle": "neoexplains"},
+    {"name": "Johnny Harris",               "id": "UCmGSJVG3mCRXVOP4yZrU1Dw", "handle": "johnnyharris"},
+    {"name": "Hoog",                         "id": "UCii9ezsUa_mBiSdw0PtSOaw", "handle": "hoog-youtube"},
+    {"name": "IMPERIAL",                     "id": "UCczAxLCL79gHXKYaEc9k-ZQ", "handle": "imperialyt"},
+    {"name": "Veritasium",                   "id": "UCHnyfMqiRRG1u-2MsSQLbXA", "handle": "veritasium"},
+    {"name": "Vox",                          "id": "UCLXo7UDZvByw2ixzpQCufnA", "handle": "Vox"},
     {"name": "Kurzgesagt – In a Nutshell",   "id": "UCsXVk37bltHxD1rDPwtNM8Q", "handle": "kurzgesagt"},
     # Replace with their exact UC... IDs if they aren't working:
-    {"name": "ECHOZERO",                     "id": "",                        "handle": "echozero"},
-    {"name": "The Present Past",             "id": "",                        "handle": "ThePresentPast_"},
+    {"name": "ECHOZERO",                     "id": "UCUq7Rxqkba4pgpKc7J5zdCg",  "handle": "echozero_"},
+    {"name": "The Present Past",             "id": "UC5Axef4J11DIu17y2RKVqNQ",  "handle": "ThePresentPast_"},
 ]
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]          # from GitHub Actions secret

@@ -28,7 +28,7 @@ from deep_translator import GoogleTranslator
 # Provide the exact "id" (starts with UC...) to guarantee accuracy.
 # If "id" is provided, handle resolution is skipped completely.
 CHANNELS = [
-    {"name": "fern",                         "id": "UCvjjYje5A15ojfs84A0252Q", "handle": "fern-tv"},
+    {"name": "fern",                         "id": "UCODHrzPMGbNv67e84WDZhQQ", "handle": "fern-tv"},
     {"name": "NeoExplains",                  "id": "UC1JsBTh4b3L_K923B06C2Yw", "handle": "neoexplains"},
     {"name": "Johnny Harris",               "id": "UC2LVhJH_9cT2XKp0VAwgKOQ", "handle": "johnnyharris"},
     {"name": "Hoog",                         "id": "UCeE3lj6pLX36O5JTh161Tqw", "handle": "hoog-youtube"},

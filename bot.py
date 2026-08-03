@@ -5,11 +5,8 @@ YouTube -> Telegram forwarding bot.
 Checks a fixed list of YouTube channels for new uploads, translates the
 title to Persian, and posts a message to a Telegram channel containing the
 video link. Telegram auto-generates a native, inline-playable preview for
-YouTube links (the person can watch right inside Telegram, no separate
-file upload needed) - this sidesteps Telegram's 50MB bot-upload limit and
-YouTube's anti-bot download blocks entirely, since nothing is downloaded.
-State (which videos have already been posted) is kept in state.json,
-which this script updates and the GitHub Actions workflow commits back.
+YouTube links.
+State (which videos have already been posted) is kept in state.json.
 """
 
 import os
@@ -28,18 +25,17 @@ from deep_translator import GoogleTranslator
 # Config
 # ----------------------------------------------------------------------
 
-# Add/remove channels here. "handle" is the part after the @ in the channel URL.
 CHANNELS = [
     {"name": "fern",         "handle": "fern-tv"},
     {"name": "NeoExplains",  "handle": "neoexplains"},
     {"name": "Johnny Harris","handle": "johnnyharris"},
     {"name": "Hoog",          "handle": "hoog-youtube"},
-    {"name": "IMPERIAL",   "handle": "imperialyt"},
-    {"name": "ECHOZERO",   "handle": "echozero"},
-    {"name": "The Present Past",   "handle": "ThePresentPast_"},
+    {"name": "IMPERIAL",      "handle": "imperialyt"},
+    {"name": "ECHOZERO",      "handle": "echozero"},
+    {"name": "The Present Past", "handle": "ThePresentPast_"},
     {"name": "Veritasium",   "handle": "veritasium"},
-    {"name": "Vox",   "handle": "Vox"},
-    {"name": "Kurzgesagt – In a Nutshell",   "handle": "kurzgesagt"},
+    {"name": "Vox",          "handle": "Vox"},
+    {"name": "Kurzgesagt – In a Nutshell", "handle": "kurzgesagt"},
 ]
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]          # from GitHub Actions secret
@@ -94,10 +90,7 @@ CHANNEL_ID_PATTERNS = [
 
 
 def resolve_channel_id(handle):
-    """Resolve a @handle to a UC... channel id by reading the channel page's
-    own HTML (no yt-dlp / no download needed for this). Retries a few times
-    since YouTube occasionally serves a different page (e.g. a consent
-    page) on a given request, and tries a couple of fallback patterns."""
+    """Resolve a @handle to a UC... channel id by reading the channel page's HTML."""
     url = f"https://www.youtube.com/@{handle}"
     last_error = None
     for attempt in range(3):
@@ -116,8 +109,15 @@ def resolve_channel_id(handle):
 
 
 def fetch_recent_entries(channel_id):
-    """Return list of dicts: video_id, title, published (datetime), url."""
-    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    """Return list of dicts: video_id, title, published (datetime), url.
+    Uses playlist_id=UULF... to specifically target long-form videos."""
+    # Convert 'UC...' channel ID to 'UULF...' long-form video playlist ID
+    if channel_id.startswith("UC"):
+        playlist_id = "UULF" + channel_id[2:]
+        feed_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={playlist_id}"
+    else:
+        feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+
     resp = requests.get(feed_url, headers=HTTP_HEADERS, timeout=30)
     resp.raise_for_status()
     root = ET.fromstring(resp.content)
@@ -152,10 +152,7 @@ def translate_to_persian(text):
 
 
 def build_message(channel_name, title, translated_title, video_url):
-    """Rich-text caption using Telegram's supported HTML formatting:
-    bold title, italic channel name, a blockquote to set the Persian
-    translation apart, and the 🔗 line hyperlinked through the channel
-    name (instead of showing the raw URL as plain text)."""
+    """Rich-text caption using Telegram's supported HTML formatting."""
     title_e = html.escape(title)
     title_fa = html.escape(translated_title)
     channel_e = html.escape(channel_name)
@@ -170,7 +167,7 @@ def build_message(channel_name, title, translated_title, video_url):
         )
 
     text = compose(title_e)
-    if len(text) > 3900:  # sendMessage allows up to 4096 chars - stay comfortably under
+    if len(text) > 3900:  # stay under Telegram's limit
         overflow = len(text) - 3900
         title_e = html.escape(title[: max(10, len(title) - overflow)] + "…")
         text = compose(title_e)
@@ -182,9 +179,7 @@ def build_message(channel_name, title, translated_title, video_url):
 # ----------------------------------------------------------------------
 
 def send_video_message(text, video_url):
-    """Send a text message containing the video link. Telegram will
-    automatically render its native inline-playable YouTube preview
-    below the text, so the video plays right in the channel."""
+    """Send a text message containing the video link."""
     payload = {
         "chat_id": CHANNEL_ID,
         "text": text,

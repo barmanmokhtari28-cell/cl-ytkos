@@ -111,33 +111,48 @@ def resolve_channel_id(handle):
     raise RuntimeError(f"Could not find channel id for @{handle} after retries: {last_error}")
 
 
+def _parse_feed(feed_url):
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(feed_url, headers=HTTP_HEADERS, timeout=30)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            entries = []
+            for entry in root.findall("atom:entry", ATOM_NS):
+                video_id = entry.find("yt:videoId", ATOM_NS).text
+                title = entry.find("atom:title", ATOM_NS).text
+                published_raw = entry.find("atom:published", ATOM_NS).text
+                published = datetime.datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
+                entries.append({
+                    "video_id": video_id,
+                    "title": title,
+                    "published": published,
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                })
+            entries.sort(key=lambda e: e["published"])
+            return entries
+        except Exception as e:
+            last_error = e
+            time.sleep(3)
+    raise RuntimeError(f"feed failed after retries ({feed_url}): {last_error}")
+
+
 def fetch_recent_entries(channel_id):
     """Return list of dicts: video_id, title, published (datetime), url.
-    Uses playlist_id=UULF... to specifically target long-form videos."""
+    Prefers the UULF... playlist feed (long-form only). If that feed errors
+    or comes back empty, falls back to the normal channel feed so a broken
+    playlist feed can never silently stop the bot."""
     if channel_id.startswith("UC"):
         playlist_id = "UULF" + channel_id[2:]
-        feed_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={playlist_id}"
-    else:
-        feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-
-    resp = requests.get(feed_url, headers=HTTP_HEADERS, timeout=30)
-    resp.raise_for_status()
-    root = ET.fromstring(resp.content)
-
-    entries = []
-    for entry in root.findall("atom:entry", ATOM_NS):
-        video_id = entry.find("yt:videoId", ATOM_NS).text
-        title = entry.find("atom:title", ATOM_NS).text
-        published_raw = entry.find("atom:published", ATOM_NS).text
-        published = datetime.datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
-        entries.append({
-            "video_id": video_id,
-            "title": title,
-            "published": published,
-            "url": f"https://www.youtube.com/watch?v={video_id}",
-        })
-    entries.sort(key=lambda e: e["published"])
-    return entries
+        try:
+            entries = _parse_feed(f"https://www.youtube.com/feeds/videos.xml?playlist_id={playlist_id}")
+            if entries:
+                return entries
+            print("  UULF feed returned 0 entries, falling back to channel feed")
+        except Exception as e:
+            print(f"  UULF feed failed ({e}), falling back to channel feed")
+    return _parse_feed(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
 
 
 # ----------------------------------------------------------------------
@@ -145,11 +160,13 @@ def fetch_recent_entries(channel_id):
 # ----------------------------------------------------------------------
 
 def translate_to_persian(text):
-    try:
-        return GoogleTranslator(source="auto", target="fa").translate(text)
-    except Exception as e:
-        print(f"  translation failed: {e}", file=sys.stderr)
-        return "(ترجمه در دسترس نیست)"
+    for attempt in range(4):
+        try:
+            return GoogleTranslator(source="auto", target="fa").translate(text)
+        except Exception as e:
+            print(f"  translation failed (attempt {attempt + 1}): {e}", file=sys.stderr)
+            time.sleep(5 * (attempt + 1))
+    return "(ترجمه در دسترس نیست)"
 
 
 def build_message(channel_name, title, translated_title, video_url):
@@ -189,10 +206,21 @@ def send_video_message(text, video_url):
             "show_above_text": False,
         }),
     }
-    resp = requests.post(f"{TG_API}/sendMessage", data=payload, timeout=60)
-    ok = resp.ok and resp.json().get("ok")
-    if not ok:
+    ok = False
+    for attempt in range(3):
+        resp = requests.post(f"{TG_API}/sendMessage", data=payload, timeout=60)
+        ok = resp.ok and resp.json().get("ok")
+        if ok:
+            break
         print(f"  sendMessage failed: {resp.status_code} {resp.text}", file=sys.stderr)
+        if resp.status_code == 429:
+            try:
+                wait = resp.json().get("parameters", {}).get("retry_after", 5)
+            except Exception:
+                wait = 5
+            time.sleep(min(int(wait) + 1, 60))
+        else:
+            break
     return ok
 
 
@@ -226,6 +254,11 @@ def main():
 
         first_run = not ch_state["initialized"]
         posted_ids = set(ch_state["posted_ids"])
+        if entries:
+            newest = entries[-1]
+            print(f"  feed: {len(entries)} entries, newest {newest['published']:%Y-%m-%d %H:%M} UTC - {newest['title'][:60]}")
+        else:
+            print("  feed: 0 entries")
 
         for entry in entries:
             if entry["video_id"] in posted_ids:
@@ -240,14 +273,20 @@ def main():
                 translated = translate_to_persian(entry["title"])
                 text = build_message(name, entry["title"], translated, entry["url"])
                 ok = send_video_message(text, entry["url"])
-                if ok:
-                    time.sleep(2)
+                if not ok:
+                    # do NOT mark as posted - retry on the next run
+                    print("  send failed, will retry next run", file=sys.stderr)
+                    continue
+                time.sleep(2)
             else:
                 print(f"  skipping (older than backfill window): {entry['title']}")
 
             posted_ids.add(entry["video_id"])
 
-        ch_state["posted_ids"] = list(posted_ids)
+        # keep state.json stable (no reshuffling) and bounded
+        ids_in_order = [e["video_id"] for e in entries if e["video_id"] in posted_ids]
+        old_ids = [i for i in ch_state["posted_ids"] if i not in ids_in_order]
+        ch_state["posted_ids"] = (old_ids + ids_in_order)[-200:]
         ch_state["initialized"] = True
 
     save_state(state)

@@ -45,6 +45,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]          # from GitHub Actions secret
 CHANNEL_ID = os.environ["TG_CHANNEL_ID"]     # e.g. "@secretollah", from secret
 
 STATE_FILE = "state.json"
+FORCE_BACKFILL = os.environ.get("FORCE_BACKFILL") == "1"   # re-post everything from the last 7 days, ignoring state
 BACKFILL_HOURS = 168        # how far back the very first run per channel looks (7 days)
 
 FOOTER = "\n\n📩 <b>@secretollah</b>\n#یوتوب"
@@ -261,12 +262,15 @@ def main():
             print("  feed: 0 entries")
 
         for entry in entries:
-            if entry["video_id"] in posted_ids:
-                continue
-
-            should_post = True
-            if first_run and entry["published"] < backfill_cutoff:
-                should_post = False
+            if FORCE_BACKFILL:
+                # ignore saved state: post everything inside the window
+                should_post = entry["published"] >= backfill_cutoff
+            else:
+                if entry["video_id"] in posted_ids:
+                    continue
+                should_post = True
+                if first_run and entry["published"] < backfill_cutoff:
+                    should_post = False
 
             if should_post:
                 print(f"  new video: {entry['title']} ({entry['video_id']})")
